@@ -1,83 +1,101 @@
-from datetime import date
+from datetime import date, timedelta
+import hashlib
 import pandas as pd
 import streamlit as st
 import plotly.express as px
-from cme import fetch_pdf,URL
 from parser import parse_pg39
-from engine import calculate, summarize, validate
+from engine import calculate, summarize
 
-st.set_page_config(page_title='EUR/USD Gamma Monitor AUTO',page_icon='📈',layout='wide')
-st.markdown('<style>.block-container{padding-top:1rem}div[data-testid="stMetric"]{background:#192738;padding:12px;border-radius:10px}</style>',unsafe_allow_html=True)
-st.title('EUR/USD · Gamma Monitor AUTO')
-st.caption('CME PG39 · Open interest extras automat · Gamma BRUTĂ estimată · NU dealer net gamma')
+st.set_page_config(page_title='EUR/USD Gamma Monitor · CME PDF', page_icon='📈', layout='wide')
+st.title('EUR/USD · Gamma Monitor')
+st.caption('CME PG39 · încărcare PDF manuală · Open Interest verificat prin totaluri · gamma BRUTĂ estimată, NU dealer net gamma')
+
 with st.sidebar:
-    st.header('Parametri model')
-    futures=st.number_input('Futures 6E USD/EUR (manual)',min_value=.5,max_value=2.5,value=1.12,step=.0005,format='%.4f')
-    iv=st.number_input('IV anualizată % (manual)',min_value=.1,max_value=200.,value=9.,step=.5)
-    tenor=st.selectbox('Scenariu maturitate (NU expirare verificată)',[7,14,30,60,90],index=2)
-    st.warning('Futures, IV și maturitatea sunt ipoteze manuale. Nu reprezintă cotații CME live sau expirările contractelor.')
+    st.header('Parametri scenariu')
+    futures = st.number_input('Futures 6E USD/EUR (manual)', min_value=.5001, max_value=2.4999, value=1.1200, step=.0005, format='%.4f')
+    iv_pct = st.number_input('IV anualizată % (manual)', min_value=.1, max_value=200., value=9., step=.5)
+    tenor = st.selectbox('Maturitate ipotetică, zile', [7,14,30,60,90], index=2)
+    st.warning('Prețul futures, IV și maturitatea sunt ipoteze. Nu sunt cotații live și nu reprezintă scadențele reale.')
 
-st.subheader('1 · Preluare automată CME')
-st.markdown(f'[Sursă CME PG39]({URL}) · Daily Bulletin publicat cu întârziere')
-if st.button('Actualizează din CME',type='primary'):
-    try:
-        with st.spinner('Descarc și extrag open interest...'):
-            b=fetch_pdf(); parsed,report_date,rejected=parse_pg39(b)
-            st.session_state['parsed']=(parsed,report_date,rejected)
-            st.session_state['pdf_bytes']=b
-        st.success('PDF preluat și interpretat. Verifică data raportului și rândurile excluse.')
-    except Exception as e:st.error(f'Actualizarea nu a reușit: {e}. Încarcă manual PDF-ul oficial.')
-upload=st.file_uploader('Alternativ: încarcă PDF CME PG39',type=['pdf'])
-if upload is not None:
-    try:
-        b=upload.getvalue();parsed,report_date,rejected=parse_pg39(b)
-        st.session_state['parsed']=(parsed,report_date,rejected);st.session_state['pdf_bytes']=b
-    except Exception as e:st.error(f'PDF neacceptat: {e}')
-
-if 'parsed' not in st.session_state:
-    st.info('Apasă Actualizează din CME sau încarcă un PDF oficial. Nu afișăm date demonstrative drept date reale.')
+st.subheader('1 · Încarcă PDF-ul oficial CME PG39')
+st.markdown('[CME Daily Bulletin](https://www.cmegroup.com/daily_bulletin/current/Section39_Euro_FX_And_Cme%24Index_Options.pdf)')
+upload = st.file_uploader('Alege PDF-ul salvat în Fișiere (iPhone)', type=['pdf'])
+if upload is None:
+    st.info('Încarcă PDF-ul oficial. Nu afișăm date simulate ca fiind reale.')
     st.stop()
-parsed,report_date,rejected=st.session_state['parsed']
-st.info(f'Data raportului CME: **{report_date or "nedetectată"}** · {len(parsed)} rânduri extrase · {len(rejected)} rânduri excluse. Raportul nu este live.')
-if report_date and (date.today()-report_date).days>5:st.warning('Raportul este mai vechi de 5 zile. Verifică dacă CME a publicat unul mai nou.')
-series=sorted(parsed.series.unique());months=sorted(parsed.contract_month.unique())
-c1,c2=st.columns(2)
-with c1: chosen_series=st.multiselect('Serii CME',series,default=series)
-with c2: chosen_months=st.multiselect('Luni contract',months,default=months)
-selected=parsed[parsed.series.isin(chosen_series)&parsed.contract_month.isin(chosen_months)].copy()
-if selected.empty:st.warning('Nu există date pentru selecție.');st.stop()
 
-st.subheader('2 · Hartă open interest REAL, din PDF')
-oi=selected.groupby('strike',as_index=False).open_interest.sum()
-max_oi=oi.loc[oi.open_interest.idxmax()]
-a,b,c=st.columns(3)
-a.metric('Max OI strike',f'{max_oi.strike:.4f}')
-b.metric('OI extras (contracte)',f'{int(selected.open_interest.sum()):,}')
-c.metric('Serii / luni',f'{selected.series.nunique()} / {selected.contract_month.nunique()}')
-fig=px.bar(oi,x='strike',y='open_interest',labels={'strike':'Strike EUR/USD','open_interest':'Open interest (contracte)'})
-fig.add_vline(x=futures,line_dash='dash',annotation_text='Futures manual')
-fig.update_layout(xaxis_tickformat='.4f',height=370,margin=dict(l=0,r=10,t=20,b=0))
-st.plotly_chart(fig,use_container_width=True)
-st.caption('Suma OI este din CME PG39. Tipul CALL/PUT și scadența exactă NU sunt deduse din rândurile ambigue ale PDF-ului.')
+payload = upload.getvalue()
+digest = hashlib.sha256(payload).hexdigest()
+if st.session_state.get('digest') != digest:
+    try:
+        with st.spinner('Extrag și verific totalurile CME...'):
+            parsed, report_date, rejected = parse_pg39(payload)
+        st.session_state['result'] = (parsed, report_date, rejected)
+        st.session_state['digest'] = digest
+    except Exception as exc:
+        st.error(f'PDF neacceptat / date nevalidate: {exc}')
+        st.stop()
 
-st.subheader('3 · Gamma brută estimată (scenariu)')
-st.warning(f'Gamma calculată pentru maturitate ipotetică de {tenor} zile, IV {iv:.1f}% și futures {futures:.4f}. Nu este gamma exactă CME și nu arată direcția hedgingului.')
-scenario=selected[['strike','open_interest']].copy()
-scenario['option_type']='CALL' # gamma Black-76 identical for CALL and PUT at same F,K,T,IV
-scenario['expiry']=(pd.Timestamp(date.today())+pd.Timedelta(days=tenor)).strftime('%Y-%m-%d')
-computed=calculate(scenario,futures,iv/100,date.today());summary=summarize(computed)
-peak=summary.loc[summary.gross_gamma.idxmax()]
-a,b=st.columns(2)
-a.metric('Max gamma brută (scenariu)',f'{peak.strike:.4f}')
-b.metric('Gamma total / mișcare 1% (scenariu)',f'${summary.gross_gamma.sum():,.0f}')
-fig2=px.bar(summary,x='strike',y='gross_gamma',labels={'strike':'Strike EUR/USD','gross_gamma':'Gamma brută estimată USD / mișcare 1%'})
-fig2.add_vline(x=futures,line_dash='dash',annotation_text='Futures manual')
-fig2.update_layout(xaxis_tickformat='.4f',height=370,margin=dict(l=0,r=10,t=20,b=0))
-st.plotly_chart(fig2,use_container_width=True)
-st.download_button('Export OI extras CSV',selected.to_csv(index=False).encode(),'cme_pg39_oi_extracted.csv','text/csv')
-st.download_button('Export gamma scenariu CSV',computed.to_csv(index=False).encode(),'gamma_scenario.csv','text/csv')
-with st.expander('Audit extracție și limitări'):
-    st.dataframe(selected,use_container_width=True,hide_index=True)
-    if not rejected.empty:st.dataframe(rejected.head(500),use_container_width=True,hide_index=True)
-    if 'pdf_bytes' in st.session_state:st.download_button('Descarcă PDF sursă',st.session_state['pdf_bytes'],'cme_pg39_source.pdf','application/pdf')
-    st.markdown('''**Atenție:** Unele serii din PG39 pot include tipuri diferite de opțiuni. Parserul extrage OI pe strike și lună, dar nu pretinde să clasifice CALL/PUT. Gamma Black-76 are aceeași valoare pentru CALL și PUT la același strike și aceiași parametri; eticheta tehnică CALL din calcul NU este clasificarea CME. Rândurile ambigue sunt excluse, nu completate. Nu deducem dealer net gamma, semnale LONG/SHORT sau orele exacte de expirare. Pentru producție, verifică periodic extragerea față de PDF și termenii de utilizare CME.''')
+parsed, report_date, rejected = st.session_state['result']
+if report_date is None:
+    st.error('Data raportului nu a putut fi identificată. Calculul este oprit.')
+    st.stop()
+if report_date > date.today():
+    st.warning('Data raportului este în viitor față de data dispozitivului. Verifică documentul.')
+elif (date.today()-report_date).days > 5:
+    st.warning('Raport mai vechi de 5 zile: datele nu sunt actuale.')
+
+st.info(f'Raport CME: **{report_date}** · **{len(parsed):,}** rânduri acceptate · **{len(rejected)}** grupuri excluse. Date întârziate, nu live.')
+if not rejected.empty:
+    st.error('Atenție: unele serii/scadențe au fost EXCLUSE deoarece nu au trecut reconcilierea OI. Totalurile și nivelurile de mai jos sunt PARȚIALE.')
+    with st.expander('Grupe excluse — vezi motivul'):
+        st.dataframe(rejected, use_container_width=True, hide_index=True)
+
+series = sorted(parsed.series.unique())
+months = sorted(parsed.contract_month.unique())
+c1,c2 = st.columns(2)
+with c1:
+    chosen_series = st.multiselect('Serii CME', series, default=series)
+with c2:
+    chosen_months = st.multiselect('Luni contract', months, default=months)
+selected = parsed[parsed.series.isin(chosen_series) & parsed.contract_month.isin(chosen_months)].copy()
+if selected.empty:
+    st.warning('Selecția nu conține rânduri validate.')
+    st.stop()
+
+st.subheader('2 · Hartă Open Interest (grupe reconciliate)')
+oi = selected.groupby('strike', as_index=False).open_interest.sum()
+peak_oi = oi.loc[oi.open_interest.idxmax()]
+a,b,c = st.columns(3)
+a.metric('Strike cu OI maxim', f'{peak_oi.strike:.4f}')
+b.metric('OI acceptat (contracte)', f'{int(selected.open_interest.sum()):,}')
+c.metric('Serii / luni', f'{selected.series.nunique()} / {selected.contract_month.nunique()}')
+fig = px.bar(oi, x='strike', y='open_interest', labels={'strike':'Strike EUR/USD', 'open_interest':'Open Interest (contracte)'})
+fig.add_vline(x=futures, line_dash='dash')
+fig.update_layout(xaxis_tickformat='.4f', height=370, margin=dict(l=0,r=10,t=20,b=0))
+st.plotly_chart(fig, use_container_width=True)
+st.caption('OI extras din PDF, numai pentru grupe cu totaluri reconciliate. CALL/PUT nu este identificat. Grupele excluse pot modifica nivelurile maxime.')
+
+st.subheader('3 · Gamma BRUTĂ — scenariu ipotetic')
+st.warning(f'Scenariu cu maturitate uniformă {tenor} zile, IV uniformă {iv_pct:.1f}% și futures manual {futures:.4f}. Nu este dealer net GEX, Gamma Flip sau semnal de tranzacționare.')
+scenario = selected[['strike','open_interest']].copy()
+scenario['option_type'] = 'CALL'  # computational placeholder only; unsigned Black-76 gamma is identical for C/P
+scenario['expiry'] = report_date + timedelta(days=tenor)
+computed = calculate(scenario, futures, iv_pct/100, asof=report_date)
+summary = summarize(computed)
+peak = summary.loc[summary.gross_gamma.idxmax()]
+a,b = st.columns(2)
+a.metric('Strike cu gamma brută maximă', f'{peak.strike:.4f}')
+b.metric('Gamma brută / mișcare 1% (model)', f'${summary.gross_gamma.sum():,.0f}')
+fig2 = px.bar(summary, x='strike', y='gross_gamma', labels={'strike':'Strike EUR/USD','gross_gamma':'Gamma brută estimată (USD / mișcare 1%)'})
+fig2.add_vline(x=futures, line_dash='dash')
+fig2.update_layout(xaxis_tickformat='.4f', height=370, margin=dict(l=0,r=10,t=20,b=0))
+st.plotly_chart(fig2, use_container_width=True)
+
+st.download_button('Export OI validat (CSV)', selected.to_csv(index=False).encode(), 'cme_pg39_validated_oi.csv', 'text/csv')
+st.download_button('Export gamma scenariu (CSV)', computed.to_csv(index=False).encode(), 'gamma_scenario.csv', 'text/csv')
+with st.expander('Audit și limite'):
+    st.dataframe(selected, use_container_width=True, hide_index=True)
+    if not rejected.empty:
+        st.dataframe(rejected, use_container_width=True, hide_index=True)
+    st.markdown('Validarea verifică suma OI per serie/scadență, dar NU dovedește individual corectitudinea fiecărui rând. Nu deducem CALL/PUT, pozițiile dealerilor sau expirările exacte. OI nu este live. Gamma este doar un scenariu brut bazat pe Black-76, fără discounting și cu IV/maturitate uniforme. Verifică periodic datele față de PDF-ul CME și respectă termenii CME.')
